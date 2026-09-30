@@ -25,7 +25,12 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp scripts/postinstall "$WORK/scripts/postinstall"
 chmod 755 "$WORK/scripts/postinstall"
+# 외장하드(exFAT)는 모든 파일이 rwx------ 라서, 설치 후 사용자가 못 읽는 문제 방지
+# (폴더·실행 파일 755, 나머지 644)
+chmod -R u=rwX,go=rX "$ROOT"
+chmod 755 "$APP/Contents/MacOS/ColorCapture"
 xattr -cr "$ROOT"
+# 개인용 서명 (다시 빌드하면 macOS가 새 앱으로 보고 권한을 다시 요청함)
 codesign --force --sign - "$APP"
 xattr -cr "$ROOT"
 

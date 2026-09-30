@@ -17,6 +17,7 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 echo "▶ 서명 중 (내 Mac 전용)"
+# 개인용 서명 (다시 빌드하면 macOS가 새 앱으로 보고 권한을 다시 요청함)
 codesign --force --sign - "$APP"
 
 echo "✅ 완료: $APP"

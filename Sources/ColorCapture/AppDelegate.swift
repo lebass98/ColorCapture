@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let colorSampler = NSColorSampler()
     private var isCapturing = false
+    private var didRequestScreenCapture = false
 
     private let recentKey = "recentColors"
     private let maxRecent = 12
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DebugLog.write("앱 시작 — 위치: \(Bundle.main.bundlePath), 화면 기록 권한: \(CGPreflightScreenCaptureAccess() ? "있음" : "없음"), 손쉬운 사용 권한: \(AXIsProcessTrusted() ? "있음" : "없음")")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: "ColorCapture")
         let menu = NSMenu()
@@ -131,6 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(login)
 
         menu.addItem(.separator())
+        let relaunch = NSMenuItem(title: "ColorCapture 다시 시작", action: #selector(relaunchApp), keyEquivalent: "")
+        relaunch.target = self
+        menu.addItem(relaunch)
         menu.addItem(NSMenuItem(title: "ColorCapture 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
@@ -171,9 +176,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func captureRegion() {
         guard !isCapturing else { return }
 
-        // 화면 기록 권한이 없으면 시스템 권한 요청 창을 띄움
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
+        // 화면 기록 권한이 없으면 캡처하지 않고 안내 (권한은 앱을 다시 켜야 적용됨)
+        DebugLog.write("캡처 시작 — 화면 기록 권한: \(CGPreflightScreenCaptureAccess() ? "있음" : "없음")")
+        guard CGPreflightScreenCaptureAccess() else {
+            if didRequestScreenCapture {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+            } else {
+                didRequestScreenCapture = true
+                CGRequestScreenCaptureAccess() // 처음 한 번은 시스템 권한 요청 창
+            }
+            HUD.shared.showMessage("화면 기록 권한이 필요해요",
+                                   "ColorCapture를 켠 뒤 메뉴 → 다시 시작")
+            return
         }
 
         do {
@@ -191,7 +205,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         process.arguments = ["-i", fileURL.path]
-        process.terminationHandler = { [weak self] _ in
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        process.terminationHandler = { [weak self] p in
+            let errorText = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DebugLog.write("screencapture 종료 코드: \(p.terminationStatus), 파일 생성: \(FileManager.default.fileExists(atPath: fileURL.path)), 오류: \(errorText.trimmingCharacters(in: .whitespacesAndNewlines))")
             DispatchQueue.main.async {
                 self?.isCapturing = false
                 // Esc로 취소하면 파일이 만들어지지 않음
@@ -208,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try process.run()
         } catch {
             isCapturing = false
+            DebugLog.write("screencapture 실행 실패: \(error.localizedDescription)")
             HUD.shared.showMessage("캡처 실패", error.localizedDescription)
         }
     }
@@ -215,6 +234,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openCaptureFolder() {
         try? FileManager.default.createDirectory(at: captureFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(captureFolder)
+    }
+
+    /// 권한 변경 후 적용하려면 앱을 다시 켜야 함
+    @objc private func relaunchApp() {
+        let path = Bundle.main.bundlePath
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 0.5; /usr/bin/open \"$0\"", path]
+        try? process.run()
+        NSApp.terminate(nil)
     }
 
     @objc private func openShortcutSettings() {
