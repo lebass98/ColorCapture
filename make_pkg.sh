@@ -57,4 +57,13 @@ OUT="dist/ColorCapture-$VERSION.pkg"
 rm -f "$OUT"
 cp -X "$WORK/final.pkg" "$OUT"
 
+# 이전 버전 설치 파일은 지우고 최신 파일 하나만 남김 (외장하드 숨김 파일 ._* 포함)
+for old in dist/ColorCapture-*.pkg; do
+    if [ "$old" != "$OUT" ]; then
+        echo "▶ 이전 파일 삭제: $old"
+        rm -f "$old"
+    fi
+done
+rm -f dist/._*
+
 echo "✅ 완료: $(pwd)/$OUT"
