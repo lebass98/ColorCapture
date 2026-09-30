@@ -28,18 +28,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        // 단축키: ⌃⇧C = 색 추출, ⌃⇧S = 영역 캡처
-        let mods = controlKey | shiftKey
-        var failed: [String] = []
-        if !HotKeyCenter.shared.register(keyCode: kVK_ANSI_C, modifiers: mods, handler: { [weak self] in self?.pickColor() }) {
-            failed.append("⌃⇧C")
+        // 단축키 (설정 창에서 바꿀 수 있음, 기본값 ⌃⇧C / ⌃⇧S)
+        let store = ShortcutStore.shared
+        store.register = { [weak self] in self?.registerHotKeys() ?? [] }
+        store.unregister = {
+            HotKeyCenter.shared.unregisterAll()
+            MouseHotKeyCenter.shared.unregisterAll()
         }
-        if !HotKeyCenter.shared.register(keyCode: kVK_ANSI_S, modifiers: mods, handler: { [weak self] in self?.captureRegion() }) {
-            failed.append("⌃⇧S")
-        }
+
+        let failed = registerHotKeys()
         if !failed.isEmpty {
-            HUD.shared.showMessage("단축키 등록 실패", "\(failed.joined(separator: ", ")) — 다른 앱이 사용 중")
+            let keys = failed.map { store.shortcut(for: $0).displayString }.joined(separator: ", ")
+            HUD.shared.showMessage("단축키 등록 실패", "\(keys) — 다른 앱이 사용 중 (메뉴 → 단축키 설정)")
         }
+    }
+
+    /// 저장된 단축키를 모두 다시 등록하고, 실패한 기능을 돌려줌
+    @discardableResult
+    private func registerHotKeys() -> [ShortcutAction] {
+        HotKeyCenter.shared.unregisterAll()
+        MouseHotKeyCenter.shared.unregisterAll()
+        var failed: [ShortcutAction] = []
+        for action in ShortcutAction.allCases {
+            let s = ShortcutStore.shared.shortcut(for: action)
+            let handler: () -> Void = { [weak self] in self?.perform(action) }
+            if let button = s.mouseButton {
+                MouseHotKeyCenter.shared.register(button: button, modifiers: s.modifiers, handler: handler)
+            } else if !HotKeyCenter.shared.register(keyCode: s.keyCode, modifiers: s.modifiers, handler: handler) {
+                failed.append(action)
+            }
+        }
+        return failed
+    }
+
+    private func perform(_ action: ShortcutAction) {
+        switch action {
+        case .pickColor: pickColor()
+        case .captureRegion: captureRegion()
+        }
+    }
+
+    /// 현재 단축키를 표시하는 메뉴 항목
+    private func actionMenuItem(_ action: ShortcutAction, selector: Selector) -> NSMenuItem {
+        let s = ShortcutStore.shared.shortcut(for: action)
+        let item: NSMenuItem
+        if let key = s.menuKeyEquivalent {
+            item = NSMenuItem(title: action.title, action: selector, keyEquivalent: key)
+            item.keyEquivalentModifierMask = s.menuModifierMask
+        } else {
+            item = NSMenuItem(title: "\(action.title)   \(s.displayString)", action: selector, keyEquivalent: "")
+        }
+        item.image = NSImage(systemSymbolName: action.symbol, accessibilityDescription: nil)
+        item.target = self
+        return item
     }
 
     // MARK: - 메뉴 (열 때마다 새로 구성)
@@ -47,17 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let pick = NSMenuItem(title: "색 추출", action: #selector(pickColor), keyEquivalent: "c")
-        pick.keyEquivalentModifierMask = [.control, .shift]
-        pick.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: nil)
-        pick.target = self
-        menu.addItem(pick)
-
-        let capture = NSMenuItem(title: "영역 캡처", action: #selector(captureRegion), keyEquivalent: "s")
-        capture.keyEquivalentModifierMask = [.control, .shift]
-        capture.image = NSImage(systemSymbolName: "crop", accessibilityDescription: nil)
-        capture.target = self
-        menu.addItem(capture)
+        menu.addItem(actionMenuItem(.pickColor, selector: #selector(pickColor)))
+        menu.addItem(actionMenuItem(.captureRegion, selector: #selector(captureRegion)))
 
         menu.addItem(.separator())
 
@@ -87,6 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let folder = NSMenuItem(title: "캡처 폴더 열기", action: #selector(openCaptureFolder), keyEquivalent: "")
         folder.target = self
         menu.addItem(folder)
+
+        let shortcuts = NSMenuItem(title: "단축키 설정…", action: #selector(openShortcutSettings), keyEquivalent: ",")
+        shortcuts.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        shortcuts.target = self
+        menu.addItem(shortcuts)
 
         let login = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -178,6 +215,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openCaptureFolder() {
         try? FileManager.default.createDirectory(at: captureFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(captureFolder)
+    }
+
+    @objc private func openShortcutSettings() {
+        ShortcutSettingsWindow.shared.show()
     }
 
     // MARK: - 로그인 시 자동 실행

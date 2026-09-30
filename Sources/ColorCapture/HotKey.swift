@@ -43,4 +43,10 @@ final class HotKeyCenter {
         handlers[id] = handler
         return true
     }
+
+    func unregisterAll() {
+        refs.forEach { UnregisterEventHotKey($0) }
+        refs.removeAll()
+        handlers.removeAll()
+    }
 }
