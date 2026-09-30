@@ -1,0 +1,12 @@
+# 빌드 결과물
+.build/
+dist/
+*.pkg
+
+# macOS / 외장하드(exFAT) 숨김 파일
+.DS_Store
+._*
+
+# 편집기
+.swiftpm/
+*.xcodeproj/

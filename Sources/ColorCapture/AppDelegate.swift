@@ -1,0 +1,223 @@
+import AppKit
+import Carbon
+import ServiceManagement
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusItem: NSStatusItem!
+    private let colorSampler = NSColorSampler()
+    private var isCapturing = false
+
+    private let recentKey = "recentColors"
+    private let maxRecent = 12
+
+    private var recentColors: [String] {
+        get { UserDefaults.standard.stringArray(forKey: recentKey) ?? [] }
+        set { UserDefaults.standard.set(Array(newValue.prefix(maxRecent)), forKey: recentKey) }
+    }
+
+    /// 캡처 이미지 저장 위치: ~/Pictures/ColorCapture
+    private var captureFolder: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ColorCapture", isDirectory: true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: "ColorCapture")
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+
+        // 단축키: ⌃⇧C = 색 추출, ⌃⇧S = 영역 캡처
+        let mods = controlKey | shiftKey
+        var failed: [String] = []
+        if !HotKeyCenter.shared.register(keyCode: kVK_ANSI_C, modifiers: mods, handler: { [weak self] in self?.pickColor() }) {
+            failed.append("⌃⇧C")
+        }
+        if !HotKeyCenter.shared.register(keyCode: kVK_ANSI_S, modifiers: mods, handler: { [weak self] in self?.captureRegion() }) {
+            failed.append("⌃⇧S")
+        }
+        if !failed.isEmpty {
+            HUD.shared.showMessage("단축키 등록 실패", "\(failed.joined(separator: ", ")) — 다른 앱이 사용 중")
+        }
+    }
+
+    // MARK: - 메뉴 (열 때마다 새로 구성)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        let pick = NSMenuItem(title: "색 추출", action: #selector(pickColor), keyEquivalent: "c")
+        pick.keyEquivalentModifierMask = [.control, .shift]
+        pick.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: nil)
+        pick.target = self
+        menu.addItem(pick)
+
+        let capture = NSMenuItem(title: "영역 캡처", action: #selector(captureRegion), keyEquivalent: "s")
+        capture.keyEquivalentModifierMask = [.control, .shift]
+        capture.image = NSImage(systemSymbolName: "crop", accessibilityDescription: nil)
+        capture.target = self
+        menu.addItem(capture)
+
+        menu.addItem(.separator())
+
+        let colors = recentColors
+        if colors.isEmpty {
+            let empty = NSMenuItem(title: "최근 색상 없음", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            let header = NSMenuItem(title: "최근 색상 (클릭하면 복사)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for hex in colors {
+                let item = NSMenuItem(title: "\(hex)   \(rgbString(hex))", action: #selector(copyRecent(_:)), keyEquivalent: "")
+                item.representedObject = hex
+                item.image = swatch(hex)
+                item.target = self
+                menu.addItem(item)
+            }
+            let clear = NSMenuItem(title: "기록 지우기", action: #selector(clearRecent), keyEquivalent: "")
+            clear.target = self
+            menu.addItem(clear)
+        }
+
+        menu.addItem(.separator())
+
+        let folder = NSMenuItem(title: "캡처 폴더 열기", action: #selector(openCaptureFolder), keyEquivalent: "")
+        folder.target = self
+        menu.addItem(folder)
+
+        let login = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLoginItem), keyEquivalent: "")
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        login.target = self
+        menu.addItem(login)
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "ColorCapture 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    // MARK: - 색 추출
+
+    @objc func pickColor() {
+        NSApp.activate(ignoringOtherApps: true)
+        colorSampler.show { [weak self] color in
+            guard let self, let color, let rgb = color.usingColorSpace(.sRGB) else { return }
+            let hex = String(format: "#%02X%02X%02X",
+                             Int((rgb.redComponent * 255).rounded()),
+                             Int((rgb.greenComponent * 255).rounded()),
+                             Int((rgb.blueComponent * 255).rounded()))
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(hex, forType: .string)
+
+            var list = self.recentColors.filter { $0 != hex }
+            list.insert(hex, at: 0)
+            self.recentColors = list
+
+            HUD.shared.showColor(rgb, hex: hex)
+        }
+    }
+
+    @objc private func copyRecent(_ sender: NSMenuItem) {
+        guard let hex = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(hex, forType: .string)
+        if let color = color(from: hex) { HUD.shared.showColor(color, hex: hex) }
+    }
+
+    @objc private func clearRecent() {
+        recentColors = []
+    }
+
+    // MARK: - 영역 캡처
+
+    @objc func captureRegion() {
+        guard !isCapturing else { return }
+
+        // 화면 기록 권한이 없으면 시스템 권한 요청 창을 띄움
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: captureFolder, withIntermediateDirectories: true)
+        } catch {
+            HUD.shared.showMessage("폴더 생성 실패", error.localizedDescription)
+            return
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let fileURL = captureFolder.appendingPathComponent("Capture_\(formatter.string(from: Date())).png")
+
+        // macOS 기본 screencapture: -i = 마우스로 드래그해서 영역 선택 (Esc 취소, 스페이스 = 창 선택)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-i", fileURL.path]
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.isCapturing = false
+                // Esc로 취소하면 파일이 만들어지지 않음
+                guard FileManager.default.fileExists(atPath: fileURL.path),
+                      let image = NSImage(contentsOf: fileURL) else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects([image])
+                HUD.shared.showImage(image, fileName: fileURL.lastPathComponent)
+            }
+        }
+
+        do {
+            isCapturing = true
+            try process.run()
+        } catch {
+            isCapturing = false
+            HUD.shared.showMessage("캡처 실패", error.localizedDescription)
+        }
+    }
+
+    @objc private func openCaptureFolder() {
+        try? FileManager.default.createDirectory(at: captureFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(captureFolder)
+    }
+
+    // MARK: - 로그인 시 자동 실행
+
+    @objc private func toggleLoginItem() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            HUD.shared.showMessage("자동 실행 설정 실패", error.localizedDescription)
+        }
+    }
+
+    // MARK: - 도우미
+
+    private func color(from hex: String) -> NSColor? {
+        guard hex.count == 7, let value = Int(hex.dropFirst(), radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+                       green: CGFloat((value >> 8) & 0xFF) / 255,
+                       blue: CGFloat(value & 0xFF) / 255,
+                       alpha: 1)
+    }
+
+    private func rgbString(_ hex: String) -> String {
+        guard let value = Int(hex.dropFirst(), radix: 16) else { return "" }
+        return "rgb(\((value >> 16) & 0xFF), \((value >> 8) & 0xFF), \(value & 0xFF))"
+    }
+
+    private func swatch(_ hex: String) -> NSImage? {
+        guard let color = color(from: hex) else { return nil }
+        return NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+            color.setFill()
+            path.fill()
+            NSColor.gray.withAlphaComponent(0.5).setStroke()
+            path.stroke()
+            return true
+        }
+    }
+}
